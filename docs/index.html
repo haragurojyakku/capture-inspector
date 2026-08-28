@@ -96,7 +96,18 @@
     position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
     background: rgba(0,0,0,.72); color: #fff; border: 1px solid #333;
     padding: 8px 16px; border-radius: 999px; font-size: .82rem;
-    transition: opacity .5s; pointer-events: none;
+    transition: opacity .5s; pointer-events: none; white-space: nowrap;
+  }
+  /* Portrait wastes most of the frame once a 16:9 chart is letterboxed into
+     it, so say so while the chart is on screen and there is time to fix it. */
+  #rotate {
+    position: fixed; left: 50%; top: 22px; transform: translateX(-50%);
+    background: #4c9aff; color: #08121f; font-weight: 700;
+    padding: 8px 18px; border-radius: 999px; font-size: .84rem;
+    display: none; pointer-events: none; white-space: nowrap;
+  }
+  @media (orientation: portrait) {
+    #stage.on #rotate { display: block; }
   }
 </style>
 </head>
@@ -114,8 +125,15 @@
 
   <button class="primary" id="go">全画面で表示する</button>
   <p class="lede" style="text-align:center; font-size:.88rem; margin:0;">
-    表示したままキャプチャしてください。画面タップまたは Esc で戻ります。
+    <strong>端末を横向きにしてから</strong>表示してください。画面タップまたは Esc で戻ります。
   </p>
+
+  <div class="callout">
+    <strong>横向きにする理由。</strong>
+    縦持ちのままミラーリングすると、16:9 の出力に対して左右へ大きな黒帯が入り、
+    チャートが映る面積が半分以下になります。パッチ1つあたりの画素数が減るぶん
+    測定のばらつきが増えるので、横向きにして画面いっぱいに表示してください。
+  </div>
 
   <h2>画像を保存する</h2>
   <p>端末の写真ビューアで開いたほうが、ブラウザを経由しないぶん余計な処理が挟まりません。</p>
@@ -188,7 +206,8 @@
 
 <div id="stage" role="dialog" aria-label="テストチャート全画面表示">
   <img id="stageImg" src="patterns/test_pattern_1920x1080.png" alt="テストチャート">
-  <div id="hint">タップで終了</div>
+  <div id="hint">横向きにして表示 — タップで終了</div>
+  <div id="rotate">端末を横向きにしてください</div>
 </div>
 
 <script>
