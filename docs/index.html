@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>キャプチャ色校正チャート — CaptureInspector</title>
+<meta name="description" content="キャプチャデバイスの色を実測するための101パッチのテストチャート。スマホで全画面表示してキャプチャしてください。">
+<style>
+  :root {
+    --bg: #0f1115;
+    --card: #171a21;
+    --line: #262b35;
+    --ink: #e6e9ef;
+    --muted: #98a1b3;
+    --accent: #4c9aff;
+    --accent-ink: #08121f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans",
+                 "Yu Gothic UI", "Noto Sans JP", sans-serif;
+    line-height: 1.75;
+    -webkit-text-size-adjust: 100%;
+  }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 28px 18px 72px; }
+  h1 { font-size: 1.5rem; line-height: 1.4; margin: 0 0 6px; }
+  h2 { font-size: 1.1rem; margin: 40px 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+  .lede { color: var(--muted); margin: 0 0 28px; }
+
+  .chart {
+    display: block; width: 100%; height: auto;
+    border: 1px solid var(--line); border-radius: 10px;
+    background: #000;
+    image-rendering: pixelated;
+  }
+
+  .primary {
+    display: block; width: 100%;
+    margin: 18px 0 10px; padding: 18px 20px;
+    background: var(--accent); color: var(--accent-ink);
+    border: 0; border-radius: 10px;
+    font: inherit; font-size: 1.05rem; font-weight: 700;
+    text-align: center; cursor: pointer;
+  }
+  .primary:active { filter: brightness(.9); }
+
+  .dl { display: grid; gap: 10px; margin: 14px 0 0; }
+  /* Stacked by default so a narrow phone never breaks "1920 x 1080" across
+     two lines; side by side once there is room for both. */
+  .dl a {
+    display: flex; flex-direction: column; gap: 2px;
+    padding: 14px 16px; text-decoration: none;
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    color: var(--ink);
+  }
+  .dl a:active { border-color: var(--accent); }
+  .dl .res { font-weight: 700; white-space: nowrap; }
+  .dl .note { color: var(--muted); font-size: .85rem; }
+  @media (min-width: 430px) {
+    .dl a { flex-direction: row; align-items: baseline; justify-content: space-between; gap: 12px; }
+    .dl .note { text-align: right; }
+  }
+
+  .callout {
+    background: var(--card); border: 1px solid var(--line);
+    border-left: 3px solid var(--accent); border-radius: 8px;
+    padding: 14px 16px; margin: 18px 0; font-size: .93rem;
+  }
+  .callout strong { color: var(--ink); }
+
+  ol { padding-left: 1.3em; }
+  ol li { margin: 10px 0; }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; margin-top: 10px; display: block; overflow-x: auto; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; }
+  code { background: var(--card); padding: 2px 6px; border-radius: 4px; font-size: .88em; }
+  footer { margin-top: 48px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: .88rem; }
+  a { color: var(--accent); }
+
+  /* Full-screen presentation: exact pixels on black, nothing else on screen. */
+  #stage {
+    position: fixed; inset: 0; display: none;
+    background: #000; z-index: 99;
+    align-items: center; justify-content: center;
+  }
+  #stage.on { display: flex; }
+  #stage img {
+    max-width: 100%; max-height: 100%;
+    width: auto; height: auto;
+    image-rendering: pixelated;
+  }
+  #hint {
+    position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+    background: rgba(0,0,0,.72); color: #fff; border: 1px solid #333;
+    padding: 8px 16px; border-radius: 999px; font-size: .82rem;
+    transition: opacity .5s; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>キャプチャ色校正チャート</h1>
+  <p class="lede">
+    101パッチのテストチャートです。これをスマホなどの映像ソースに表示し、
+    キャプチャした結果と見比べることで、「送った色」と「返ってきた色」の差を実測します。
+  </p>
+
+  <img class="chart" src="patterns/test_pattern_1920x1080.png"
+       alt="101パッチのテストチャート。グレースケール、黒端・白端の階調、原色、色相環、記憶色。">
+
+  <button class="primary" id="go">全画面で表示する</button>
+  <p class="lede" style="text-align:center; font-size:.88rem; margin:0;">
+    表示したままキャプチャしてください。画面タップまたは Esc で戻ります。
+  </p>
+
+  <h2>画像を保存する</h2>
+  <p>端末の写真ビューアで開いたほうが、ブラウザを経由しないぶん余計な処理が挟まりません。</p>
+  <div class="dl">
+    <a href="patterns/test_pattern_1920x1080.png" download>
+      <span class="res">1920 × 1080</span>
+      <span class="note">推奨 / 多くの端末のHDMI出力に一致</span>
+    </a>
+    <a href="patterns/test_pattern_3840x2160.png" download>
+      <span class="res">3840 × 2160</span>
+      <span class="note">4K入力で受ける場合</span>
+    </a>
+    <a href="patterns/test_pattern_1280x720.png" download>
+      <span class="res">1280 × 720</span>
+      <span class="note">720pまでの環境</span>
+    </a>
+  </div>
+
+  <div class="callout">
+    <strong>16:9 を選ぶ理由。</strong>
+    スマホの画面比ではなく、<strong>HDMI出力の解像度</strong>に合わせます。
+    縦長の画面比で作ると、ミラーリング時に上下左右へ黒帯が入り、
+    チャートが占める面積が小さくなって測定精度が落ちます。
+  </div>
+
+  <h2>使いかた</h2>
+  <ol>
+    <li>スマホの<strong>明るさ自動調整・Night Shift・画面の色調整</strong>を切る。
+        これらが効いていると測定値が測るたびに変わります。</li>
+    <li>チャートを<strong>全画面</strong>で表示する（上のボタン、または保存した画像を写真ビューアで開く）。</li>
+    <li>PC 側で <a href="https://github.com/haragurojyakku/capture-inspector">CaptureInspector</a>
+        を起動し、「色校正」タブで<strong>③ 測定する</strong>。</li>
+    <li>結果に応じて<strong>④ 補正LUTを保存</strong>し、OBS の「LUT を適用」フィルタで読み込む。</li>
+  </ol>
+
+  <div class="callout">
+    <strong>LUT より先に確認すること。</strong>
+    「リミテッドレンジがそのまま出力されています」と出た場合は、
+    まず OBS のソースのプロパティで「色範囲」を<strong>『一部』</strong>に変えて測定し直してください。
+    設定ひとつで直る問題を LUT で塗り潰すと、原因が見えなくなります。
+    また<strong>クリップ（黒潰れ・白飛び）は情報が失われている</strong>ため、LUT では復元できません。
+  </div>
+
+  <h2>チャートの構成</h2>
+  <table>
+    <thead><tr><th>行</th><th>内容</th><th>分かること</th></tr></thead>
+    <tbody>
+      <tr><td>グレー 17段</td><td>0〜255</td><td>黒/白レベル・ガンマ・チャンネル別ゲイン</td></tr>
+      <tr><td>黒端 8段</td><td>0,4,8,12,16,20,24,32</td><td>暗部のクリップ</td></tr>
+      <tr><td>白端 8段</td><td>219〜255</td><td>明部のクリップ</td></tr>
+      <tr><td>原色 8色</td><td>RGBCMY + 白黒</td><td>色域の頂点</td></tr>
+      <tr><td>色相 12色</td><td>彩度100% 明度100%</td><td>色相回転の検出</td></tr>
+      <tr><td>色相 12色</td><td>彩度45%（淡）</td><td>マトリクスのフィット用</td></tr>
+      <tr><td>色相 12色</td><td>明度50%（濃）</td><td>暗部での色相ずれ</td></tr>
+      <tr><td>中間色 12色</td><td>50%原色・混色</td><td>中間輝度での線形性</td></tr>
+      <tr><td>記憶色 12色</td><td>肌5・空3・緑2・橙・煉瓦</td><td>実用上の色ズレ</td></tr>
+    </tbody>
+  </table>
+  <p style="color:var(--muted); font-size:.9rem;">
+    色相を等間隔に並べているのは、YUV→RGB のマトリクス誤差が<strong>色相環全体を回転させる</strong>ためです。
+    手選びの色より等間隔サンプルのほうが回転を捉えやすく、補正マトリクスのフィットも安定します。
+    彩度45%の行は、飽和して 0 や 255 に張り付いたパッチを除外したあとに残るサンプルを確保するためのものです。
+  </p>
+
+  <footer>
+    <a href="https://github.com/haragurojyakku/capture-inspector">haragurojyakku/capture-inspector</a>
+    — USBキャプチャデバイスの診断と色校正
+  </footer>
+</div>
+
+<div id="stage" role="dialog" aria-label="テストチャート全画面表示">
+  <img id="stageImg" src="patterns/test_pattern_1920x1080.png" alt="テストチャート">
+  <div id="hint">タップで終了</div>
+</div>
+
+<script>
+(function () {
+  var stage = document.getElementById('stage');
+  var hint = document.getElementById('hint');
+  var timer;
+
+  function open() {
+    stage.classList.add('on');
+    // Fullscreen hides the browser chrome; if the request is refused we still
+    // have a black overlay covering the page, so the chart is unobstructed.
+    var el = document.documentElement;
+    var req = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (req) { try { req.call(el); } catch (e) {} }
+    hint.style.opacity = '1';
+    clearTimeout(timer);
+    timer = setTimeout(function () { hint.style.opacity = '0'; }, 2200);
+  }
+
+  function close() {
+    stage.classList.remove('on');
+    if (document.fullscreenElement || document.webkitFullscreenElement) {
+      var exit = document.exitFullscreen || document.webkitExitFullscreen;
+      if (exit) { try { exit.call(document); } catch (e) {} }
+    }
+  }
+
+  document.getElementById('go').addEventListener('click', open);
+  stage.addEventListener('click', close);
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { close(); }
+  });
+  document.addEventListener('fullscreenchange', function () {
+    if (!document.fullscreenElement) { stage.classList.remove('on'); }
+  });
+})();
+</script>
+</body>
+</html>
