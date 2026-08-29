@@ -434,19 +434,19 @@ class App(tk.Tk):
         self.config(cursor="watch")
 
         def worker() -> None:
-            from .calibration import analyse_colors, find_pattern_bbox, measure
+            from .calibration import analyse_colors, locate, measure
             from .devices import grab_single_frame
 
             try:
                 frame = grab_single_frame(device.index)
-                bbox = find_pattern_bbox(frame)
-                if bbox is None:
+                loc = locate(frame)
+                if loc is None:
                     raise ValueError(
-                        "テストパターンを検出できませんでした。"
-                        "パターンが画面いっぱいに表示されているか確認してください。"
+                        "テストパターンを検出できませんでした。\n"
+                        "四隅のマーカー（赤・緑・青・黄）が4つとも画面に写っているか確認してください。"
                     )
-                report = analyse_colors(measure(frame, bbox))
-                self.after(0, lambda: self._show_calibration(report, bbox, frame.shape))
+                report = analyse_colors(measure(frame, loc))
+                self.after(0, lambda: self._show_calibration(report, loc, frame.shape))
             except Exception as exc:  # noqa: BLE001
                 message = f"{type(exc).__name__}: {exc}"
                 self.after(0, lambda: self._calibration_failed(message))
@@ -458,7 +458,7 @@ class App(tk.Tk):
         self.color_status.set("測定に失敗しました")
         self._write_color(message)
 
-    def _show_calibration(self, report, bbox, shape) -> None:
+    def _show_calibration(self, report, loc, shape) -> None:
         from .calibration import LAYOUT
 
         self.config(cursor="")
@@ -466,8 +466,13 @@ class App(tk.Tk):
         self.btn_lut.configure(state="normal")
         self.color_status.set("測定完了")
 
-        lines = [
-            f"フレーム {shape[1]}x{shape[0]} / パターン検出領域 {bbox[0]},{bbox[1]} - {bbox[2]},{bbox[3]}",
+        how = "四隅マーカー" if loc.method == "markers" else "外周フレーム（マーカー未検出）"
+        lines = [f"フレーム {shape[1]}x{shape[0]} / 位置合わせ: {how}"]
+        if loc.markers:
+            lines.append("  " + "  ".join(
+                f"{k.upper()}({v[0]:.0f},{v[1]:.0f})" for k, v in loc.markers.items()
+            ))
+        lines += [
             "",
             f"黒レベル : {report.black_level:7.2f}   (理想 0)",
             f"白レベル : {report.white_level:7.2f}   (理想 255)",

@@ -18,6 +18,34 @@ from .diagnose import Finding, Severity
 
 # Fraction of the image taken by the white locator frame at the very edge.
 BORDER = 0.014
+# Band inside the frame reserved for the corner markers. Patches live inside it.
+MARGIN = 0.085
+# Marker square size as a fraction of the image's shorter side.
+MARKER = 0.060
+
+# Each corner carries a different centre colour, which is what tells us the
+# chart's orientation. Four widely separated hues stay distinguishable even
+# when the capture chain has the colour errors we are here to measure.
+MARKER_IDS: dict[str, tuple[int, int, int]] = {
+    "tl": (255, 0, 0),
+    "tr": (0, 255, 0),
+    "br": (0, 0, 255),
+    "bl": (255, 255, 0),
+}
+MARKER_POS: dict[str, tuple[float, float]] = {
+    "tl": (MARGIN / 2, MARGIN / 2),
+    "tr": (1 - MARGIN / 2, MARGIN / 2),
+    "br": (1 - MARGIN / 2, 1 - MARGIN / 2),
+    "bl": (MARGIN / 2, 1 - MARGIN / 2),
+}
+
+# Marker layers as half-widths, in units of the marker square's side. From the
+# centre out: colour, black, white, black. The alternation is what separates a
+# real marker from a chart patch that happens to be the same colour.
+LAYER_COLOR = 0.20
+LAYER_INNER_BLACK = 0.30
+LAYER_WHITE = 0.42
+LAYER_OUTER_BLACK = 0.50
 # Only the middle of each patch is measured, so scaling softness at patch
 # boundaries cannot contaminate the reading.
 SAMPLE_FRACTION = 0.5
@@ -126,7 +154,7 @@ def _row(group: str, entries, y: float, h: float, inner: float) -> list[Patch]:
             Patch(
                 name=name,
                 group=group,
-                x=BORDER + i * (w + gap),
+                x=MARGIN + i * (w + gap),
                 y=y,
                 w=w,
                 h=h,
@@ -137,7 +165,7 @@ def _row(group: str, entries, y: float, h: float, inner: float) -> list[Patch]:
 
 
 def build_layout() -> list[Patch]:
-    inner = 1.0 - BORDER * 2
+    inner = 1.0 - MARGIN * 2
     patches: list[Patch] = []
 
     def gray(prefix: str, levels: list[int]):
@@ -155,7 +183,7 @@ def build_layout() -> list[Patch]:
         ("memory", MEMORY, 0.888, 0.092),
     ]
     for group, entries, y, h in rows:
-        patches += _row(group, entries, y=BORDER + inner * y, h=inner * h, inner=inner)
+        patches += _row(group, entries, y=MARGIN + inner * y, h=inner * h, inner=inner)
     return patches
 
 
@@ -180,10 +208,305 @@ def render_pattern(width: int = 1920, height: int = 1080):
         y1 = int(round((patch.y + patch.h) * height))
         draw.rectangle([x0, y0, x1 - 1, y1 - 1], fill=patch.ref)
 
+    _draw_markers(draw, width, height)
     return img
 
 
+def _draw_markers(draw, width: int, height: int) -> None:
+    """Concentric black/white/black squares around a colour centre, one per corner."""
+    side = MARKER * min(width, height)
+    for name, (nx, ny) in MARKER_POS.items():
+        cx, cy = nx * width, ny * height
+        for half, colour in (
+            (LAYER_OUTER_BLACK, (0, 0, 0)),
+            (LAYER_WHITE, (255, 255, 255)),
+            (LAYER_INNER_BLACK, (0, 0, 0)),
+            (LAYER_COLOR, MARKER_IDS[name]),
+        ):
+            d = half * side
+            draw.rectangle(
+                [int(round(cx - d)), int(round(cy - d)),
+                 int(round(cx + d)) - 1, int(round(cy + d)) - 1],
+                fill=colour,
+            )
+
+
 # ---------------------------------------------------------------- locating
+@dataclass
+class Localization:
+    """Where the chart is in a captured frame, as chart coords -> pixel coords."""
+
+    homography: np.ndarray
+    method: str
+    markers: dict[str, tuple[float, float]] | None = None
+
+    def map_points(self, pts: np.ndarray) -> np.ndarray:
+        """Map normalised chart coordinates to pixel coordinates."""
+        homogeneous = np.column_stack([pts, np.ones(len(pts))])
+        out = homogeneous @ self.homography.T
+        return out[:, :2] / out[:, 2:3]
+
+
+def _color_masks(frame: np.ndarray) -> dict[str, np.ndarray]:
+    """One mask per marker colour, using channel ratios rather than absolutes.
+
+    Ratios survive the level, gamma and white-balance errors we are trying to
+    measure; fixed thresholds would not, and a chart that only locates itself
+    on a well-behaved capture would be useless exactly when it is needed.
+    """
+    f = frame.astype(np.float32)
+    r, g, b = f[..., 0], f[..., 1], f[..., 2]
+    total = f.sum(axis=2) + 1e-6
+    bright = total > 90
+
+    return {
+        "tl": bright & (r / total > 0.50) & (g / total < 0.32) & (b / total < 0.32),
+        "tr": bright & (g / total > 0.50) & (r / total < 0.32) & (b / total < 0.32),
+        "br": bright & (b / total > 0.45) & (r / total < 0.35) & (g / total < 0.35),
+        "bl": bright & (r / total > 0.33) & (g / total > 0.33) & (b / total < 0.20),
+    }
+
+
+def _components(mask: np.ndarray, min_pixels: int = 6) -> list[tuple[float, float, float, float, int]]:
+    """Connected components as (cx, cy, half_x, half_y, area), 4-connectivity."""
+    h, w = mask.shape
+    seen = np.zeros((h, w), dtype=bool)
+    found: list[tuple[float, float, float, float, int]] = []
+
+    ys, xs = np.nonzero(mask)
+    for y0, x0 in zip(ys.tolist(), xs.tolist()):
+        if seen[y0, x0]:
+            continue
+        stack = [(y0, x0)]
+        seen[y0, x0] = True
+        pts: list[tuple[int, int]] = []
+        while stack:
+            y, x = stack.pop()
+            pts.append((y, x))
+            for ny, nx in ((y + 1, x), (y - 1, x), (y, x + 1), (y, x - 1)):
+                if 0 <= ny < h and 0 <= nx < w and mask[ny, nx] and not seen[ny, nx]:
+                    seen[ny, nx] = True
+                    stack.append((ny, nx))
+        if len(pts) < min_pixels:
+            continue
+        arr = np.array(pts, dtype=float)
+        cy, cx = arr[:, 0].mean(), arr[:, 1].mean()
+        half_y = (np.ptp(arr[:, 0]) + 1) / 2
+        half_x = (np.ptp(arr[:, 1]) + 1) / 2
+        found.append((cx, cy, half_x, half_y, len(pts)))
+    return found
+
+
+def _verify_rings(
+    frame: np.ndarray, cx: float, cy: float, half_x: float, half_y: float,
+    min_agreement: float = 0.7,
+) -> bool:
+    """Check for a bright ring bounded by darker ones, in every direction.
+
+    A chart patch of the marker's colour sits next to other patches; only a real
+    marker is ringed by black, then white, then black. This is what stops the
+    pure red, green, blue and yellow patches from being mistaken for markers.
+
+    Rather than sampling fixed radii, each ray is walked outward and the
+    profile is required to go dark, bright, dark in that order. Where the
+    transitions fall is left free, so the test survives a rotated chart (whose
+    square layers no longer line up with the axes) and one stretched unevenly
+    (whose layers are no longer square at all).
+    """
+    lum = frame.astype(np.float32).mean(axis=2)
+    h, w = lum.shape
+    # Radii in units of the colour centre's own half-extent, so anisotropy and
+    # rotation both come out in the wash. A square reaches sqrt(2) further at
+    # its corners than along its axes, hence the generous upper bound.
+    radii = np.linspace(1.05, 3.8, 24)
+    agree = 0
+    tested = 0
+
+    for ang in range(0, 360, 20):
+        rad = np.deg2rad(ang)
+        dx, dy = np.cos(rad) * half_x, np.sin(rad) * half_y
+        xs = np.round(cx + radii * dx).astype(int)
+        ys = np.round(cy + radii * dy).astype(int)
+        ok = (xs >= 0) & (xs < w) & (ys >= 0) & (ys < h)
+        if ok.sum() < len(radii) * 0.6:
+            continue
+        profile = lum[ys[ok], xs[ok]]
+        tested += 1
+
+        peak = int(np.argmax(profile))
+        if peak == 0 or peak == profile.size - 1:
+            continue
+        bright = float(profile[peak])
+        before = float(profile[:peak].min())
+        after = float(profile[peak + 1:].min())
+        if bright > 70 and bright - before > 40 and bright - after > 40:
+            agree += 1
+
+    return tested >= 12 and agree / tested >= min_agreement
+
+
+CORNER_ORDER = ("tl", "tr", "br", "bl")
+
+
+def _candidates(frame: np.ndarray, mask: np.ndarray, limit: int = 8):
+    """Ring-verified, roughly square blobs of one marker colour.
+
+    The squareness test prunes the obvious impostors: a marker's colour centre
+    is a small square, whereas the chart's own red, green, blue and yellow
+    patches are wide rectangles in a row. It is not decisive on its own - a
+    rotated patch's bounding box tends towards square - so every survivor is
+    kept as a candidate and the combination search settles which four are real.
+    """
+    out = []
+    for cx, cy, half_x, half_y, _area in sorted(_components(mask), key=lambda c: -c[4]):
+        if min(half_x, half_y) < 2:
+            continue
+        if not 0.55 < half_x / half_y < 1.8:
+            continue
+        if _verify_rings(frame, cx, cy, half_x, half_y):
+            out.append((cx, cy, (half_x + half_y) / 2))
+            if len(out) >= limit:
+                break
+    return out
+
+
+def _quad_area(pts: np.ndarray) -> float:
+    """Shoelace area, used to prefer the quad that spans the whole chart."""
+    x, y = pts[:, 0], pts[:, 1]
+    return abs(float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))) / 2
+
+
+def _is_convex(pts: np.ndarray) -> bool:
+    """True when the four points wind consistently, i.e. form a real quad."""
+    signs = []
+    for i in range(4):
+        a, b, c = pts[i], pts[(i + 1) % 4], pts[(i + 2) % 4]
+        u, v = b - a, c - b
+        signs.append(np.sign(u[0] * v[1] - u[1] * v[0]))
+    return abs(sum(signs)) == 4
+
+
+def _sample(frame: np.ndarray, loc: "Localization", names, grid: int = 5):
+    """Mean RGB for named patches - the shared core of measuring and validating."""
+    h, w = frame.shape[:2]
+    steps = np.linspace(0.5 - SAMPLE_FRACTION / 2, 0.5 + SAMPLE_FRACTION / 2, grid)
+    uu, vv = np.meshgrid(steps, steps)
+    unit = np.column_stack([uu.ravel(), vv.ravel()])
+    by_name = {p.name: p for p in LAYOUT}
+
+    out: dict[str, np.ndarray] = {}
+    for name in names:
+        patch = by_name.get(name)
+        if patch is None:
+            continue
+        pts = np.column_stack([
+            patch.x + unit[:, 0] * patch.w,
+            patch.y + unit[:, 1] * patch.h,
+        ])
+        mapped = np.round(loc.map_points(pts)).astype(int)
+        xs, ys = mapped[:, 0], mapped[:, 1]
+        inside = (xs >= 0) & (xs < w) & (ys >= 0) & (ys < h)
+        if inside.sum() < grid:
+            continue
+        out[name] = frame[ys[inside], xs[inside]].astype(float).mean(axis=0)
+    return out
+
+
+def _score_fit(frame: np.ndarray, homography: np.ndarray) -> float | None:
+    """Check a candidate mapping against patches whose content we already know.
+
+    Four points always fit a homography exactly, so there is no reprojection
+    error to look at. Instead the mapping has to explain the chart: the patches
+    we called black must come back dark, the white ones bright, and each pure
+    primary must still lead on its own channel. A mapping built from the wrong
+    blobs fails this immediately.
+    """
+    loc = Localization(homography, "markers")
+    probe = _sample(frame, loc, ("gray0", "black", "gray255", "white", "red", "green", "blue"))
+    if len(probe) < 7:
+        return None
+
+    dark = (probe["gray0"].mean() + probe["black"].mean()) / 2
+    light = (probe["gray255"].mean() + probe["white"].mean()) / 2
+    if light - dark < 60:
+        return None
+
+    for name, channel in (("red", 0), ("green", 1), ("blue", 2)):
+        if int(np.argmax(probe[name])) != channel:
+            return None
+    return float(light - dark)
+
+
+def find_markers(frame: np.ndarray) -> dict[str, tuple[float, float]] | None:
+    """Locate the four corner markers and return their pixel centres."""
+    import itertools
+
+    masks = _color_masks(frame)
+    candidates = {k: _candidates(frame, masks[k]) for k in CORNER_ORDER}
+    if any(not c for c in candidates.values()):
+        return None
+
+    src = np.array([MARKER_POS[k] for k in CORNER_ORDER], dtype=float)
+
+    # Cheap geometric filters first, then score only the most promising quads.
+    # Sorting by area puts the real markers near the front: they sit at the
+    # chart's corners, so any impostor drawn from the patch grid spans less.
+    viable = []
+    for combo in itertools.product(*(candidates[k] for k in CORNER_ORDER)):
+        sizes = [c[2] for c in combo]
+        # One uniform scale applies to the whole chart, so the four markers
+        # cannot come back wildly different sizes.
+        if max(sizes) / min(sizes) > 1.8:
+            continue
+        pts = np.array([[c[0], c[1]] for c in combo], dtype=float)
+        if not _is_convex(pts):
+            continue
+        viable.append((_quad_area(pts), pts, combo))
+
+    viable.sort(key=lambda item: -item[0])
+
+    best: tuple[float, dict[str, tuple[float, float]]] | None = None
+    for _area, pts, combo in viable[:200]:
+        score = _score_fit(frame, solve_homography(src, pts))
+        if score is not None and (best is None or score > best[0]):
+            best = (score, {k: (c[0], c[1]) for k, c in zip(CORNER_ORDER, combo)})
+
+    return best[1] if best is not None else None
+
+
+def solve_homography(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
+    """Direct linear transform for the 4-point chart -> frame mapping.
+
+    A homography rather than an affine fit: it costs nothing extra with four
+    correspondences and it also covers a chart photographed slightly off-axis,
+    not just one scaled and letterboxed by a mirroring phone.
+    """
+    rows = []
+    for (x, y), (u, v) in zip(src, dst):
+        rows.append([-x, -y, -1, 0, 0, 0, u * x, u * y, u])
+        rows.append([0, 0, 0, -x, -y, -1, v * x, v * y, v])
+    _, _, vt = np.linalg.svd(np.array(rows, dtype=float))
+    h = vt[-1].reshape(3, 3)
+    return h / h[2, 2]
+
+
+def locate(frame: np.ndarray) -> Localization | None:
+    """Find the chart, preferring corner markers and falling back to the frame."""
+    markers = find_markers(frame)
+    if markers is not None:
+        src = np.array([MARKER_POS[k] for k in ("tl", "tr", "br", "bl")], dtype=float)
+        dst = np.array([markers[k] for k in ("tl", "tr", "br", "bl")], dtype=float)
+        return Localization(solve_homography(src, dst), "markers", markers)
+
+    bbox = find_pattern_bbox(frame)
+    if bbox is None:
+        return None
+    x0, y0, x1, y1 = bbox
+    src = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=float)
+    dst = np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], dtype=float)
+    return Localization(solve_homography(src, dst), "frame")
+
+
 def find_pattern_bbox(frame: np.ndarray, threshold: int = 60) -> tuple[int, int, int, int] | None:
     """Find the chart inside a captured frame.
 
@@ -202,24 +525,15 @@ def find_pattern_bbox(frame: np.ndarray, threshold: int = 60) -> tuple[int, int,
     return int(cols[0]), int(rows[0]), int(cols[-1]) + 1, int(rows[-1]) + 1
 
 
-def measure(frame: np.ndarray, bbox: tuple[int, int, int, int]) -> dict[str, np.ndarray]:
-    """Mean RGB of every patch, read from the middle of each rectangle."""
-    x0, y0, x1, y1 = bbox
-    span_x, span_y = x1 - x0, y1 - y0
-    out: dict[str, np.ndarray] = {}
+def measure(frame: np.ndarray, loc: Localization, grid: int = 9) -> dict[str, np.ndarray]:
+    """Mean RGB of every patch, sampled through the localisation.
 
-    for patch in LAYOUT:
-        inset_w = patch.w * (1 - SAMPLE_FRACTION) / 2
-        inset_h = patch.h * (1 - SAMPLE_FRACTION) / 2
-        px0 = x0 + int(round((patch.x + inset_w) * span_x))
-        px1 = x0 + int(round((patch.x + patch.w - inset_w) * span_x))
-        py0 = y0 + int(round((patch.y + inset_h) * span_y))
-        py1 = y0 + int(round((patch.y + patch.h - inset_h) * span_y))
-        if px1 <= px0 or py1 <= py0:
-            continue
-        region = frame[py0:py1, px0:px1].reshape(-1, 3)
-        out[patch.name] = region.mean(axis=0)
-    return out
+    Sampling is done by mapping a grid of points from chart space into the
+    frame, rather than by carving up a rectangle. That keeps the reading
+    correct when the chart arrives rotated or slightly off-axis, where an
+    axis-aligned crop would straddle patch boundaries.
+    """
+    return _sample(frame, loc, [p.name for p in LAYOUT], grid=grid)
 
 
 # ---------------------------------------------------------------- analysis
