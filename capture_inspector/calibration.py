@@ -16,36 +16,37 @@ import numpy as np
 
 from .diagnose import Finding, Severity
 
-# Fraction of the image taken by the white locator frame at the very edge.
-BORDER = 0.014
-# Band inside the frame reserved for the corner markers. Patches live inside it.
-MARGIN = 0.085
-# Marker square size as a fraction of the image's shorter side.
-MARKER = 0.060
+# The chart is square. A phone can then show it large in either orientation,
+# instead of the user having to fight a 16:9 image into a portrait screen.
+#
+# Localisation borrows QR's finder pattern: concentric squares whose every
+# scan line through the centre reads 1:1:3:1:1 dark-light-dark-light-dark.
+# Being purely geometric it costs nothing when the colours are wrong, which
+# matters on a chart whose whole job is to measure colour error.
+MODULE = 0.015
+FINDER_MODULES = 7          # QR finder: 7x7, ringed by a light quiet zone
+ALIGN_MODULES = 5           # QR alignment: 5x5, deliberately smaller
+QUIET_MODULES = 1
 
-# Each corner carries a different centre colour, which is what tells us the
-# chart's orientation. Four widely separated hues stay distinguishable even
-# when the capture chain has the colour errors we are here to measure.
-MARKER_IDS: dict[str, tuple[int, int, int]] = {
-    "tl": (255, 0, 0),
-    "tr": (0, 255, 0),
-    "br": (0, 0, 255),
-    "bl": (255, 255, 0),
-}
+FINDER_RATIO = (1, 1, 3, 1, 1)
+ALIGN_RATIO = (1, 1, 1, 1, 1)
+
+# Centres sit the same distance from each corner so the four points form a
+# square, which keeps the homography well conditioned.
+CORNER_INSET = 0.02 + (FINDER_MODULES / 2) * MODULE
+
 MARKER_POS: dict[str, tuple[float, float]] = {
-    "tl": (MARGIN / 2, MARGIN / 2),
-    "tr": (1 - MARGIN / 2, MARGIN / 2),
-    "br": (1 - MARGIN / 2, 1 - MARGIN / 2),
-    "bl": (MARGIN / 2, 1 - MARGIN / 2),
+    "tl": (CORNER_INSET, CORNER_INSET),
+    "tr": (1 - CORNER_INSET, CORNER_INSET),
+    "br": (1 - CORNER_INSET, 1 - CORNER_INSET),
+    "bl": (CORNER_INSET, 1 - CORNER_INSET),
 }
+# Three finders and one smaller alignment pattern, exactly as a QR symbol does
+# it: the odd corner out is what tells us which way up the chart is.
+ALIGNMENT_CORNER = "br"
 
-# Marker layers as half-widths, in units of the marker square's side. From the
-# centre out: colour, black, white, black. The alternation is what separates a
-# real marker from a chart patch that happens to be the same colour.
-LAYER_COLOR = 0.20
-LAYER_INNER_BLACK = 0.30
-LAYER_WHITE = 0.42
-LAYER_OUTER_BLACK = 0.50
+# Keep-out around each corner, so patches never touch a locator pattern.
+CORNER_KEEPOUT = 0.02 + (FINDER_MODULES + QUIET_MODULES) * MODULE
 # Only the middle of each patch is measured, so scaling softness at patch
 # boundaries cannot contaminate the reading.
 SAMPLE_FRACTION = 0.5
@@ -142,48 +143,48 @@ class Patch:
     ref: tuple[int, int, int]
 
 
-def _row(group: str, entries, y: float, h: float, inner: float) -> list[Patch]:
-    """Lay `entries` out evenly across the usable width at height `y`."""
+def _row(group: str, entries, y: float, h: float, x0: float, x1: float) -> list[Patch]:
+    """Lay `entries` out evenly between x0 and x1 at height `y`."""
     n = len(entries)
-    gap = inner * 0.006
-    total = inner - gap * (n - 1)
-    w = total / n
-    out: list[Patch] = []
-    for i, (name, ref) in enumerate(entries):
-        out.append(
-            Patch(
-                name=name,
-                group=group,
-                x=MARGIN + i * (w + gap),
-                y=y,
-                w=w,
-                h=h,
-                ref=ref,
-            )
-        )
-    return out
+    span = x1 - x0
+    gap = span * 0.008
+    w = (span - gap * (n - 1)) / n
+    return [
+        Patch(name=name, group=group, x=x0 + i * (w + gap), y=y, w=w, h=h, ref=ref)
+        for i, (name, ref) in enumerate(entries)
+    ]
 
 
 def build_layout() -> list[Patch]:
-    inner = 1.0 - MARGIN * 2
-    patches: list[Patch] = []
+    """Ten rows on a square: two short ones tucked between the corner patterns,
+    eight full-width ones in the band below them."""
 
-    def gray(prefix: str, levels: list[int]):
+    def gray(prefix: str, levels) -> list[tuple[str, tuple[int, int, int]]]:
         return [(f"{prefix}{v}", (v, v, v)) for v in levels]
 
-    rows = [
-        ("gray", gray("gray", GRAY_STEPS), 0.020, 0.112),
-        ("black_end", gray("k", BLACK_END), 0.146, 0.072),
-        ("white_end", gray("w", WHITE_END), 0.232, 0.072),
-        ("primary", PRIMARIES, 0.318, 0.104),
-        ("hue_vivid", HUE_VIVID, 0.436, 0.104),
-        ("hue_pastel", HUE_PASTEL, 0.554, 0.104),
-        ("hue_deep", HUE_DEEP, 0.672, 0.104),
-        ("mid", MID_PRIMARIES, 0.790, 0.084),
-        ("memory", MEMORY, 0.888, 0.092),
+    edge, inner_edge = 0.025, CORNER_KEEPOUT + 0.015
+    band_top, band_bottom = CORNER_KEEPOUT + 0.012, 1 - CORNER_KEEPOUT - 0.012
+    short_h = CORNER_KEEPOUT - edge - 0.012
+
+    middle = [
+        ("gray", gray("gray", GRAY_STEPS[:9])),
+        ("gray", gray("gray", GRAY_STEPS[9:])),
+        ("primary", PRIMARIES),
+        ("hue_vivid", HUE_VIVID),
+        ("hue_pastel", HUE_PASTEL),
+        ("hue_deep", HUE_DEEP),
+        ("mid", MID_PRIMARIES),
+        ("memory", MEMORY),
     ]
-    for group, entries, y, h in rows:
-        patches += _row(group, entries, y=MARGIN + inner * y, h=inner * h, inner=inner)
+    step = (band_bottom - band_top) / len(middle)
+
+    patches = _row("black_end", gray("k", BLACK_END),
+                   y=edge, h=short_h, x0=inner_edge, x1=1 - inner_edge)
+    for i, (group, entries) in enumerate(middle):
+        patches += _row(group, entries,
+                        y=band_top + i * step, h=step * 0.9, x0=edge, x1=1 - edge)
+    patches += _row("white_end", gray("w", WHITE_END),
+                    y=1 - edge - short_h, h=short_h, x0=inner_edge, x1=1 - inner_edge)
     return patches
 
 
@@ -191,15 +192,13 @@ LAYOUT = build_layout()
 
 
 # --------------------------------------------------------------- rendering
-def render_pattern(width: int = 1920, height: int = 1080):
-    """Draw the chart. Display this full-screen on the source device."""
+def render_pattern(side: int = 1080, height: int | None = None):
+    """Draw the chart. The chart is square; `height` is accepted and ignored."""
     from PIL import Image, ImageDraw
 
-    img = Image.new("RGB", (width, height), (255, 255, 255))
+    width = height = side
+    img = Image.new("RGB", (width, height), (0, 0, 0))
     draw = ImageDraw.Draw(img)
-
-    bw = max(int(round(BORDER * min(width, height))), 2)
-    draw.rectangle([bw, bw, width - bw - 1, height - bw - 1], fill=(0, 0, 0))
 
     for patch in LAYOUT:
         x0 = int(round(patch.x * width))
@@ -213,20 +212,32 @@ def render_pattern(width: int = 1920, height: int = 1080):
 
 
 def _draw_markers(draw, width: int, height: int) -> None:
-    """Concentric black/white/black squares around a colour centre, one per corner."""
-    side = MARKER * min(width, height)
+    """QR-style locator patterns: three finders and one alignment pattern.
+
+    Each is drawn on a light quiet zone. The chart's background is black, so
+    without that quiet zone the outermost dark ring would merge into the
+    background and the 1:1:3:1:1 scan signature would be lost.
+    """
+    module = MODULE * min(width, height)
+
     for name, (nx, ny) in MARKER_POS.items():
         cx, cy = nx * width, ny * height
-        for half, colour in (
-            (LAYER_OUTER_BLACK, (0, 0, 0)),
-            (LAYER_WHITE, (255, 255, 255)),
-            (LAYER_INNER_BLACK, (0, 0, 0)),
-            (LAYER_COLOR, MARKER_IDS[name]),
-        ):
-            d = half * side
+        if name == ALIGNMENT_CORNER:
+            rings = [(ALIGN_MODULES + 2 * QUIET_MODULES, (255, 255, 255)),
+                     (ALIGN_MODULES, (0, 0, 0)),
+                     (ALIGN_MODULES - 2, (255, 255, 255)),
+                     (1, (0, 0, 0))]
+        else:
+            rings = [(FINDER_MODULES + 2 * QUIET_MODULES, (255, 255, 255)),
+                     (FINDER_MODULES, (0, 0, 0)),
+                     (FINDER_MODULES - 2, (255, 255, 255)),
+                     (FINDER_MODULES - 4, (0, 0, 0))]
+
+        for modules, colour in rings:
+            half = modules * module / 2
             draw.rectangle(
-                [int(round(cx - d)), int(round(cy - d)),
-                 int(round(cx + d)) - 1, int(round(cy + d)) - 1],
+                [int(round(cx - half)), int(round(cy - half)),
+                 int(round(cx + half)) - 1, int(round(cy + half)) - 1],
                 fill=colour,
             )
 
@@ -246,134 +257,125 @@ class Localization:
         out = homogeneous @ self.homography.T
         return out[:, :2] / out[:, 2:3]
 
+    def chart_size(self) -> tuple[float, float]:
+        """Width and height the chart occupies in the frame, in pixels."""
+        corners = self.map_points(np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=float))
+        top = np.linalg.norm(corners[1] - corners[0])
+        bottom = np.linalg.norm(corners[2] - corners[3])
+        left = np.linalg.norm(corners[3] - corners[0])
+        right = np.linalg.norm(corners[2] - corners[1])
+        return float((top + bottom) / 2), float((left + right) / 2)
 
-def _color_masks(frame: np.ndarray) -> dict[str, np.ndarray]:
-    """One mask per marker colour, using channel ratios rather than absolutes.
+    def sample_box(self) -> tuple[float, float]:
+        """Pixels actually averaged for the tightest patch on the chart.
 
-    Ratios survive the level, gamma and white-balance errors we are trying to
-    measure; fixed thresholds would not, and a chart that only locates itself
-    on a well-behaved capture would be useless exactly when it is needed.
+        This is the number that decides whether a reading means anything: the
+        chart can be located perfectly and still be far too small to measure,
+        because the display scaled it down and blended neighbouring patches
+        into each other.
+        """
+        width, height = self.chart_size()
+        narrowest = min(p.w for p in LAYOUT)
+        shortest = min(p.h for p in LAYOUT)
+        return (narrowest * width * SAMPLE_FRACTION,
+                shortest * height * SAMPLE_FRACTION)
+
+
+def _otsu(lum: np.ndarray) -> float:
+    """Threshold that best separates the frame into dark and light."""
+    hist, edges = np.histogram(lum, bins=64, range=(0, 255))
+    hist = hist.astype(float)
+    total = hist.sum()
+    if total == 0:
+        return 128.0
+    centres = (edges[:-1] + edges[1:]) / 2
+    weight_bg = np.cumsum(hist)
+    weight_fg = total - weight_bg
+    valid = (weight_bg > 0) & (weight_fg > 0)
+    if not valid.any():
+        return 128.0
+    cum = np.cumsum(hist * centres)
+    mean_bg = np.divide(cum, weight_bg, out=np.zeros_like(cum), where=weight_bg > 0)
+    mean_fg = np.divide(cum[-1] - cum, weight_fg, out=np.zeros_like(cum), where=weight_fg > 0)
+    variance = weight_bg * weight_fg * (mean_bg - mean_fg) ** 2
+    variance[~valid] = -1
+    return float(centres[int(np.argmax(variance))])
+
+
+def _runs(line: np.ndarray):
+    """Run-length encode a boolean line into (value, start, length) arrays."""
+    if line.size == 0:
+        return np.array([]), np.array([]), np.array([])
+    change = np.flatnonzero(np.diff(line)) + 1
+    starts = np.concatenate(([0], change))
+    ends = np.concatenate((change, [line.size]))
+    return line[starts], starts, ends - starts
+
+
+def _scan(line: np.ndarray, ratio, tolerance: float = 0.55):
+    """Centres along one line whose run lengths match `ratio`, starting dark.
+
+    This is QR's own trick: the finder is built so that any line through its
+    middle crosses runs in a fixed proportion, whatever the angle or the scale.
+    Matching proportions rather than sizes is what makes it scale-free.
     """
-    f = frame.astype(np.float32)
-    r, g, b = f[..., 0], f[..., 1], f[..., 2]
-    total = f.sum(axis=2) + 1e-6
-    bright = total > 90
-
-    return {
-        "tl": bright & (r / total > 0.50) & (g / total < 0.32) & (b / total < 0.32),
-        "tr": bright & (g / total > 0.50) & (r / total < 0.32) & (b / total < 0.32),
-        "br": bright & (b / total > 0.45) & (r / total < 0.35) & (g / total < 0.35),
-        "bl": bright & (r / total > 0.33) & (g / total > 0.33) & (b / total < 0.20),
-    }
-
-
-def _components(mask: np.ndarray, min_pixels: int = 6) -> list[tuple[float, float, float, float, int]]:
-    """Connected components as (cx, cy, half_x, half_y, area), 4-connectivity."""
-    h, w = mask.shape
-    seen = np.zeros((h, w), dtype=bool)
-    found: list[tuple[float, float, float, float, int]] = []
-
-    ys, xs = np.nonzero(mask)
-    for y0, x0 in zip(ys.tolist(), xs.tolist()):
-        if seen[y0, x0]:
-            continue
-        stack = [(y0, x0)]
-        seen[y0, x0] = True
-        pts: list[tuple[int, int]] = []
-        while stack:
-            y, x = stack.pop()
-            pts.append((y, x))
-            for ny, nx in ((y + 1, x), (y - 1, x), (y, x + 1), (y, x - 1)):
-                if 0 <= ny < h and 0 <= nx < w and mask[ny, nx] and not seen[ny, nx]:
-                    seen[ny, nx] = True
-                    stack.append((ny, nx))
-        if len(pts) < min_pixels:
-            continue
-        arr = np.array(pts, dtype=float)
-        cy, cx = arr[:, 0].mean(), arr[:, 1].mean()
-        half_y = (np.ptp(arr[:, 0]) + 1) / 2
-        half_x = (np.ptp(arr[:, 1]) + 1) / 2
-        found.append((cx, cy, half_x, half_y, len(pts)))
-    return found
-
-
-def _verify_rings(
-    frame: np.ndarray, cx: float, cy: float, half_x: float, half_y: float,
-    min_agreement: float = 0.7,
-) -> bool:
-    """Check for a bright ring bounded by darker ones, in every direction.
-
-    A chart patch of the marker's colour sits next to other patches; only a real
-    marker is ringed by black, then white, then black. This is what stops the
-    pure red, green, blue and yellow patches from being mistaken for markers.
-
-    Rather than sampling fixed radii, each ray is walked outward and the
-    profile is required to go dark, bright, dark in that order. Where the
-    transitions fall is left free, so the test survives a rotated chart (whose
-    square layers no longer line up with the axes) and one stretched unevenly
-    (whose layers are no longer square at all).
-    """
-    lum = frame.astype(np.float32).mean(axis=2)
-    h, w = lum.shape
-    # Radii in units of the colour centre's own half-extent, so anisotropy and
-    # rotation both come out in the wash. A square reaches sqrt(2) further at
-    # its corners than along its axes, hence the generous upper bound.
-    radii = np.linspace(1.05, 3.8, 24)
-    agree = 0
-    tested = 0
-
-    for ang in range(0, 360, 20):
-        rad = np.deg2rad(ang)
-        dx, dy = np.cos(rad) * half_x, np.sin(rad) * half_y
-        xs = np.round(cx + radii * dx).astype(int)
-        ys = np.round(cy + radii * dy).astype(int)
-        ok = (xs >= 0) & (xs < w) & (ys >= 0) & (ys < h)
-        if ok.sum() < len(radii) * 0.6:
-            continue
-        profile = lum[ys[ok], xs[ok]]
-        tested += 1
-
-        peak = int(np.argmax(profile))
-        if peak == 0 or peak == profile.size - 1:
-            continue
-        bright = float(profile[peak])
-        before = float(profile[:peak].min())
-        after = float(profile[peak + 1:].min())
-        if bright > 70 and bright - before > 40 and bright - after > 40:
-            agree += 1
-
-    return tested >= 12 and agree / tested >= min_agreement
-
-
-CORNER_ORDER = ("tl", "tr", "br", "bl")
-
-
-def _candidates(frame: np.ndarray, mask: np.ndarray, limit: int = 8):
-    """Ring-verified, roughly square blobs of one marker colour.
-
-    The squareness test prunes the obvious impostors: a marker's colour centre
-    is a small square, whereas the chart's own red, green, blue and yellow
-    patches are wide rectangles in a row. It is not decisive on its own - a
-    rotated patch's bounding box tends towards square - so every survivor is
-    kept as a candidate and the combination search settles which four are real.
-    """
+    values, starts, lengths = _runs(line)
+    n = len(ratio)
+    total_ratio = sum(ratio)
     out = []
-    for cx, cy, half_x, half_y, _area in sorted(_components(mask), key=lambda c: -c[4]):
-        if min(half_x, half_y) < 2:
+    for i in range(len(values) - n + 1):
+        if not values[i]:            # the pattern must begin on a dark run
             continue
-        if not 0.55 < half_x / half_y < 1.8:
+        window = lengths[i:i + n]
+        unit = window.sum() / total_ratio
+        if unit < 0.8:
             continue
-        if _verify_rings(frame, cx, cy, half_x, half_y):
-            out.append((cx, cy, (half_x + half_y) / 2))
-            if len(out) >= limit:
-                break
+        if np.all(np.abs(window - np.array(ratio) * unit) <= tolerance * unit):
+            middle = i + n // 2
+            out.append((starts[middle] + lengths[middle] / 2, unit))
     return out
 
 
-def _quad_area(pts: np.ndarray) -> float:
-    """Shoelace area, used to prefer the quad that spans the whole chart."""
-    x, y = pts[:, 0], pts[:, 1]
-    return abs(float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))) / 2
+def _locator_centres(dark: np.ndarray, ratio, stride: int = 2):
+    """Find locator patterns by scanning rows, then confirming down columns."""
+    height, width = dark.shape
+    found: list[tuple[float, float, float]] = []
+
+    for y in range(0, height, stride):
+        for cx, unit in _scan(dark[y], ratio):
+            column = dark[:, int(round(cx))]
+            for cy, unit_v in _scan(column, ratio):
+                if abs(cy - y) > unit * 2:
+                    continue
+                # The horizontal and vertical module sizes only match when the
+                # chart arrived square. Allow a wide mismatch so a display that
+                # stretches the image unevenly still resolves - the run-ratio
+                # test already validated the shape along each axis separately.
+                if not 0.33 < unit_v / unit < 3.0:
+                    continue
+                found.append((cx, cy, (unit + unit_v) / 2))
+                break
+
+    # Every row crossing the same pattern reports it, so collapse the cluster.
+    clusters: list[list[tuple[float, float, float]]] = []
+    for cx, cy, unit in found:
+        for group in clusters:
+            gx, gy, gu = group[0]
+            if abs(cx - gx) < gu * 3 and abs(cy - gy) < gu * 3:
+                group.append((cx, cy, unit))
+                break
+        else:
+            clusters.append([(cx, cy, unit)])
+
+    return [
+        (float(np.mean([c[0] for c in g])),
+         float(np.mean([c[1] for c in g])),
+         float(np.mean([c[2] for c in g])))
+        for g in clusters if len(g) >= 2
+    ]
+
+
+CORNER_ORDER = ("tl", "tr", "br", "bl")
 
 
 def _is_convex(pts: np.ndarray) -> bool:
@@ -437,39 +439,67 @@ def _score_fit(frame: np.ndarray, homography: np.ndarray) -> float | None:
     return float(light - dark)
 
 
+def _assign_corners(finders, alignment):
+    """Name the four points, using the odd one out to fix the orientation.
+
+    The alignment pattern marks one corner; of the three finders the one
+    furthest from it is the opposite corner, and the remaining two fall either
+    side of that diagonal. Which side is which comes from the sign of the cross
+    product, so a rotated or mirrored chart still resolves correctly.
+    """
+    br = np.array(alignment[:2])
+    pts = [np.array(f[:2]) for f in finders]
+
+    tl = max(pts, key=lambda p: np.hypot(*(p - br)))
+    rest = [p for p in pts if p is not tl]
+    if len(rest) != 2:
+        return None
+
+    diagonal = br - tl
+    sides = [float(diagonal[0] * (p - tl)[1] - diagonal[1] * (p - tl)[0]) for p in rest]
+    if sides[0] * sides[1] >= 0:      # both on one side: not a real corner set
+        return None
+
+    tr, bl = (rest[0], rest[1]) if sides[0] < 0 else (rest[1], rest[0])
+    return {
+        "tl": (float(tl[0]), float(tl[1])),
+        "tr": (float(tr[0]), float(tr[1])),
+        "br": (float(br[0]), float(br[1])),
+        "bl": (float(bl[0]), float(bl[1])),
+    }
+
+
 def find_markers(frame: np.ndarray) -> dict[str, tuple[float, float]] | None:
-    """Locate the four corner markers and return their pixel centres."""
+    """Locate the QR-style locator patterns and return their pixel centres."""
     import itertools
 
-    masks = _color_masks(frame)
-    candidates = {k: _candidates(frame, masks[k]) for k in CORNER_ORDER}
-    if any(not c for c in candidates.values()):
+    lum = frame.astype(np.float32).mean(axis=2)
+    dark = lum < _otsu(lum)
+
+    finders = _locator_centres(dark, FINDER_RATIO)
+    alignments = _locator_centres(dark, ALIGN_RATIO)
+    if len(finders) < 3 or not alignments:
         return None
 
     src = np.array([MARKER_POS[k] for k in CORNER_ORDER], dtype=float)
-
-    # Cheap geometric filters first, then score only the most promising quads.
-    # Sorting by area puts the real markers near the front: they sit at the
-    # chart's corners, so any impostor drawn from the patch grid spans less.
-    viable = []
-    for combo in itertools.product(*(candidates[k] for k in CORNER_ORDER)):
-        sizes = [c[2] for c in combo]
-        # One uniform scale applies to the whole chart, so the four markers
-        # cannot come back wildly different sizes.
-        if max(sizes) / min(sizes) > 1.8:
-            continue
-        pts = np.array([[c[0], c[1]] for c in combo], dtype=float)
-        if not _is_convex(pts):
-            continue
-        viable.append((_quad_area(pts), pts, combo))
-
-    viable.sort(key=lambda item: -item[0])
-
     best: tuple[float, dict[str, tuple[float, float]]] | None = None
-    for _area, pts, combo in viable[:200]:
-        score = _score_fit(frame, solve_homography(src, pts))
-        if score is not None and (best is None or score > best[0]):
-            best = (score, {k: (c[0], c[1]) for k, c in zip(CORNER_ORDER, combo)})
+
+    # A busy frame can throw up extra candidates, so try the plausible sets and
+    # let the chart itself decide which one actually explains the picture.
+    for trio in itertools.combinations(finders[:6], 3):
+        units = [f[2] for f in trio]
+        if max(units) / min(units) > 1.8:
+            continue
+        for align in alignments[:6]:
+            corners = _assign_corners(trio, align)
+            if corners is None:
+                continue
+            pts = np.array([corners[k] for k in CORNER_ORDER], dtype=float)
+            if not _is_convex(pts):
+                continue
+            score = _score_fit(frame, solve_homography(src, pts))
+            if score is not None and (best is None or score > best[0]):
+                best = (score, corners)
 
     return best[1] if best is not None else None
 
@@ -491,38 +521,20 @@ def solve_homography(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
 
 
 def locate(frame: np.ndarray) -> Localization | None:
-    """Find the chart, preferring corner markers and falling back to the frame."""
-    markers = find_markers(frame)
-    if markers is not None:
-        src = np.array([MARKER_POS[k] for k in ("tl", "tr", "br", "bl")], dtype=float)
-        dst = np.array([markers[k] for k in ("tl", "tr", "br", "bl")], dtype=float)
-        return Localization(solve_homography(src, dst), "markers", markers)
+    """Find the chart from its four locator patterns, or report failure.
 
-    bbox = find_pattern_bbox(frame)
-    if bbox is None:
-        return None
-    x0, y0, x1, y1 = bbox
-    src = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=float)
-    dst = np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], dtype=float)
-    return Localization(solve_homography(src, dst), "frame")
-
-
-def find_pattern_bbox(frame: np.ndarray, threshold: int = 60) -> tuple[int, int, int, int] | None:
-    """Find the chart inside a captured frame.
-
-    The chart's outermost pixels are a white frame, and anything around it -
-    letterbox bars from an aspect-ratio mismatch - is black. So the bounding box
-    of everything bright enough is the chart itself. Because patch positions are
-    then read proportionally inside that box, this also absorbs any stretching.
+    There is deliberately no fallback. The old one took the bounding box of
+    everything bright, which only worked because the chart used to carry a
+    white outer frame; against the square chart it would lock onto the patch
+    grid and return a confidently wrong mapping. A clear failure the user can
+    act on beats a measurement that is quietly off.
     """
-    lum = frame.max(axis=2)
-    mask = lum > threshold
-
-    rows = np.where(mask.sum(axis=1) > mask.shape[1] * 0.5)[0]
-    cols = np.where(mask.sum(axis=0) > mask.shape[0] * 0.5)[0]
-    if rows.size < 2 or cols.size < 2:
+    markers = find_markers(frame)
+    if markers is None:
         return None
-    return int(cols[0]), int(rows[0]), int(cols[-1]) + 1, int(rows[-1]) + 1
+    src = np.array([MARKER_POS[k] for k in CORNER_ORDER], dtype=float)
+    dst = np.array([markers[k] for k in CORNER_ORDER], dtype=float)
+    return Localization(solve_homography(src, dst), "markers", markers)
 
 
 def measure(frame: np.ndarray, loc: Localization, grid: int = 9) -> dict[str, np.ndarray]:
@@ -611,7 +623,53 @@ def _fit_channel(refs: np.ndarray, values: np.ndarray) -> tuple[float, float, fl
     return gamma, span, black
 
 
-def analyse_colors(measurements: dict[str, np.ndarray]) -> ColorReport:
+# Below this many pixels per sampled patch, neighbouring patches have bled into
+# each other badly enough that the numbers stop meaning anything.
+SAMPLE_TOO_SMALL = 10.0
+SAMPLE_MARGINAL = 20.0
+
+
+def _judge_scale(report: ColorReport, loc: "Localization", frame_shape) -> None:
+    """Warn when the chart was displayed too small to measure honestly."""
+    box_w, box_h = loc.sample_box()
+    smallest = min(box_w, box_h)
+    chart_w, chart_h = loc.chart_size()
+    coverage = (chart_w * chart_h) / (frame_shape[1] * frame_shape[0]) * 100
+
+    detail = (
+        f"チャートはフレームの {coverage:.1f}% "
+        f"（{chart_w:.0f}x{chart_h:.0f} px）しか占めていません。\n"
+        f"1パッチあたりの実測領域は約 {box_w:.0f}x{box_h:.0f} px です。"
+    )
+    fix = (
+        "スマホを横向きにして、チャートを画面いっぱいに表示してください。\n"
+        "写真ビューアで開いている場合は画像をタップしてUI（上部のファイル名や下部のツールバー）を隠すか、"
+        "配布ページの「全画面で表示する」を使ってください。\n"
+        "小さく表示すると表示側の縮小補間で隣のパッチの色が混ざり、測定値そのものが濁ります。"
+    )
+
+    if smallest < SAMPLE_TOO_SMALL:
+        report.findings.insert(0, Finding(
+            Severity.CRITICAL,
+            "チャートが小さすぎます — この測定結果は使えません",
+            detail + "\n\nこの大きさでは隣のパッチの色が混ざり込んでおり、"
+                     "ここから作ったLUTは色被りを起こします。",
+            fix,
+        ))
+    elif smallest < SAMPLE_MARGINAL:
+        report.findings.insert(0, Finding(
+            Severity.WARNING,
+            "チャートが小さめです — 精度が落ちています",
+            detail,
+            fix,
+        ))
+
+
+def analyse_colors(
+    measurements: dict[str, np.ndarray],
+    loc: "Localization | None" = None,
+    frame_shape=None,
+) -> ColorReport:
     report = ColorReport(measurements=measurements)
     add = report.findings.append
 
@@ -640,6 +698,10 @@ def analyse_colors(measurements: dict[str, np.ndarray]) -> ColorReport:
     report.white_clipped_above = _first_distinct(list(reversed(WHITE_END)), measurements, "w")
 
     _judge(report)
+    # Inserted at the front afterwards: if the chart was too small, that
+    # outranks everything else below it, because it explains the rest.
+    if loc is not None and frame_shape is not None:
+        _judge_scale(report, loc, frame_shape)
     return report
 
 

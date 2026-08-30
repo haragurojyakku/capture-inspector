@@ -407,22 +407,26 @@ class App(tk.Tk):
         from .calibration import render_pattern
 
         device = self.selected
-        default = (1920, 1080)
-        if device and device.best:
+        # The chart is square so it survives either phone orientation; size it
+        # from the capture's shorter side, which is what limits detail.
+        side = 1080
+        if device:
             pick = practical_choice(device)
             if pick:
-                default = (pick.width, pick.height)
+                side = min(pick.width, pick.height)
 
         path = filedialog.asksaveasfilename(
             title="テストパターンの保存先",
             defaultextension=".png",
-            initialfile=f"capture_test_pattern_{default[0]}x{default[1]}.png",
+            initialfile=f"capture_test_pattern_{side}x{side}.png",
             filetypes=[("PNG image", "*.png")],
         )
         if not path:
             return
-        render_pattern(*default).save(path)
-        self.color_status.set(f"保存しました ({default[0]}x{default[1]})。スマホに転送して全画面表示してください。")
+        render_pattern(side).save(path)
+        self.color_status.set(
+            f"保存しました ({side}x{side})。スマホでできるだけ大きく表示してください。"
+        )
 
     def run_calibration(self) -> None:
         device = self.selected
@@ -445,7 +449,7 @@ class App(tk.Tk):
                         "テストパターンを検出できませんでした。\n"
                         "四隅のマーカー（赤・緑・青・黄）が4つとも画面に写っているか確認してください。"
                     )
-                report = analyse_colors(measure(frame, loc))
+                report = analyse_colors(measure(frame, loc), loc, frame.shape)
                 self.after(0, lambda: self._show_calibration(report, loc, frame.shape))
             except Exception as exc:  # noqa: BLE001
                 message = f"{type(exc).__name__}: {exc}"
@@ -467,7 +471,14 @@ class App(tk.Tk):
         self.color_status.set("測定完了")
 
         how = "四隅マーカー" if loc.method == "markers" else "外周フレーム（マーカー未検出）"
-        lines = [f"フレーム {shape[1]}x{shape[0]} / 位置合わせ: {how}"]
+        chart_w, chart_h = loc.chart_size()
+        box_w, box_h = loc.sample_box()
+        coverage = (chart_w * chart_h) / (shape[1] * shape[0]) * 100
+        lines = [
+            f"フレーム {shape[1]}x{shape[0]} / 位置合わせ: {how}",
+            f"チャート {chart_w:.0f}x{chart_h:.0f} px (フレームの {coverage:.1f}%)"
+            f" / 1パッチの実測領域 {box_w:.0f}x{box_h:.0f} px",
+        ]
         if loc.markers:
             lines.append("  " + "  ".join(
                 f"{k.upper()}({v[0]:.0f},{v[1]:.0f})" for k, v in loc.markers.items()

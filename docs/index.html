@@ -98,17 +98,6 @@
     padding: 8px 16px; border-radius: 999px; font-size: .82rem;
     transition: opacity .5s; pointer-events: none; white-space: nowrap;
   }
-  /* Portrait wastes most of the frame once a 16:9 chart is letterboxed into
-     it, so say so while the chart is on screen and there is time to fix it. */
-  #rotate {
-    position: fixed; left: 50%; top: 22px; transform: translateX(-50%);
-    background: #4c9aff; color: #08121f; font-weight: 700;
-    padding: 8px 18px; border-radius: 999px; font-size: .84rem;
-    display: none; pointer-events: none; white-space: nowrap;
-  }
-  @media (orientation: portrait) {
-    #stage.on #rotate { display: block; }
-  }
 </style>
 </head>
 <body>
@@ -121,51 +110,56 @@
   </p>
 
   <div class="callout">
-    <strong>完全な全画面表示でなくても測れます。</strong>
-    四隅にマーカーが入っているので、チャートが画面の一部にしか映っていなくても、
-    位置がずれていても、縦横比が変わっていても、
+    <strong>正方形なので、端末を縦に持っても横に持っても大きく映ります。</strong>
+    四隅の位置合わせパターン（QRコードのファインダパターンと同じ仕組み）で位置を割り出すので、
+    画面の一部にしか映っていなくても、傾いていても、
     ブラウザのアドレスバーやステータスバーが写り込んでいても検出できます。
-    <strong>四隅のマーカーが4つとも写っていること</strong>だけが条件です。
+    条件は<strong>四隅のパターンが4つとも写っていること</strong>だけです。
   </div>
 
-  <img class="chart" src="patterns/test_pattern_1920x1080.png"
-       alt="101パッチのテストチャート。グレースケール、黒端・白端の階調、原色、色相環、記憶色。">
+  <img class="chart" src="patterns/test_pattern_1080x1080.png"
+       alt="101パッチの正方形テストチャート。四隅にQR風の位置合わせパターン、グレースケール、黒端・白端の階調、原色、色相環、記憶色。">
 
   <button class="primary" id="go">全画面で表示する</button>
   <p class="lede" style="text-align:center; font-size:.88rem; margin:0;">
-    <strong>端末を横向きにしてから</strong>表示してください。画面タップまたは Esc で戻ります。
+    表示したままキャプチャしてください。画面タップまたは Esc で戻ります。
   </p>
 
   <div class="callout">
-    <strong>横向きが望ましい理由。</strong>
-    縦持ちのままミラーリングしても<em>測定は成立します</em>が、16:9 の出力に対して
-    左右へ大きな黒帯が入り、チャートが映る面積が半分以下になります。
-    パッチ1つあたりの画素数が減るぶん測定のばらつきが増えるので、
-    可能なら横向きにして大きく映してください。精度の問題であって、成否の問題ではありません。
+    <strong>とにかく大きく映してください。</strong>
+    正方形なので向きは問いませんが、大きさは効きます。
+    写真ビューアで開いている場合は<strong>画像をタップしてUIを隠し</strong>、
+    ピンチで画面いっぱいに広げてください。上部のファイル名や下部のツールバーが
+    出たままだと、チャートはその分だけ小さくなります。
+    小さく映すと表示側の縮小補間と映像フォーマットの色差圧縮で
+    隣のパッチの色が混ざり、<strong>測定値そのものが濁ります</strong>。
   </div>
 
   <h2>画像を保存する</h2>
   <p>端末の写真ビューアで開いたほうが、ブラウザを経由しないぶん余計な処理が挟まりません。</p>
   <div class="dl">
-    <a href="patterns/test_pattern_1920x1080.png" download>
-      <span class="res">1920 × 1080</span>
-      <span class="note">推奨 / 多くの端末のHDMI出力に一致</span>
+    <a href="patterns/test_pattern_1080x1080.png" download>
+      <span class="res">1080 × 1080</span>
+      <span class="note">推奨 / 1080p のキャプチャに合う</span>
     </a>
-    <a href="patterns/test_pattern_3840x2160.png" download>
-      <span class="res">3840 × 2160</span>
+    <a href="patterns/test_pattern_2160x2160.png" download>
+      <span class="res">2160 × 2160</span>
       <span class="note">4K入力で受ける場合</span>
     </a>
-    <a href="patterns/test_pattern_1280x720.png" download>
-      <span class="res">1280 × 720</span>
+    <a href="patterns/test_pattern_720x720.png" download>
+      <span class="res">720 × 720</span>
       <span class="note">720pまでの環境</span>
     </a>
   </div>
 
   <div class="callout">
-    <strong>16:9 を選ぶ理由。</strong>
-    スマホの画面比ではなく、<strong>HDMI出力の解像度</strong>に合わせます。
-    縦長の画面比で作ると、ミラーリング時に上下左右へ黒帯が入り、
-    チャートが占める面積が小さくなって測定精度が落ちます。
+    <strong>正方形にした理由。</strong>
+    測定精度を決めるのは<strong>1パッチあたりの画素数</strong>です。
+    16:9 のチャートを縦持ちのスマホに表示すると、上下に大きな余白ができて
+    チャートが小さくなり、パッチが十数ピクセルまで痩せてしまいます。
+    正方形なら向きを問わず画面の短辺いっぱいまで使えるので、
+    同じ状況でも<strong>1パッチあたりの面積がおよそ2倍</strong>になります。
+    サイズは出力の横幅ではなく<strong>短辺</strong>に合わせて選んでください。
   </div>
 
   <h2>使いかた</h2>
@@ -173,7 +167,7 @@
     <li>スマホの<strong>明るさ自動調整・Night Shift・画面の色調整</strong>を切る。
         これらが効いていると測定値が測るたびに変わります。</li>
     <li>チャートを表示する（上のボタン、または保存した画像を写真ビューアで開く）。
-        全画面でなくても構いませんが、<strong>四隅のマーカーが4つとも映るように</strong>してください。</li>
+        <strong>四隅のパターンが4つとも映る範囲で、できるだけ大きく</strong>してください。</li>
     <li>PC 側で <a href="https://github.com/haragurojyakku/capture-inspector">CaptureInspector</a>
         を起動し、「色校正」タブで<strong>③ 測定する</strong>。</li>
     <li>結果に応じて<strong>④ 補正LUTを保存</strong>し、OBS の「LUT を適用」フィルタで読み込む。</li>
@@ -187,27 +181,32 @@
     また<strong>クリップ（黒潰れ・白飛び）は情報が失われている</strong>ため、LUT では復元できません。
   </div>
 
-  <h2>四隅のマーカー</h2>
+  <h2>四隅の位置合わせパターン</h2>
   <p>
-    各コーナーに <strong>黒 → 白 → 黒 → 色</strong> の入れ子になった正方形が入っています。
-    中心の色（左上=赤 / 右上=緑 / 右下=青 / 左下=黄）がどのコーナーかを表すので、
-    チャートが回転していても向きが確定します。
+    QRコードのファインダパターンをそのまま借りています。入れ子の正方形は、
+    中心を通るどの向きの走査線でも
+    <strong>暗:明:暗:明:暗 = 1:1:3:1:1</strong> の比率で交差します。
+    比率を見るので、大きさにも角度にも依存せずに見つけられます。
   </p>
   <p>
-    検出側は、まずこの4色の塊を探し、その周囲が
-    <strong>暗→明→暗</strong>の順になっているかを全方向で確認します。
-    チャート本体にも赤・緑・青・黄のパッチがありますが、
-    それらは隣り合うパッチに囲まれていてこの縞にならないため、区別できます。
+    左上・右上・左下に大きなファインダパターン（7モジュール）、
+    右下だけ小さなアライメントパターン（5モジュール）を置いています。
+    QRコードと同じで、<strong>この非対称性が向きを決めます</strong>。
     見つかった4点から射影変換（ホモグラフィ）を組み、各パッチの位置を逆算して測色します。
-    だから表示サイズ・位置・縦横比・回転に依存しません。
   </p>
+  <div class="callout">
+    <strong>形だけで位置を決めているのが要点です。</strong>
+    色でマーカーを識別すると、色ズレを測る道具なのに
+    その色ズレで位置合わせが不安定になります。QR方式なら
+    色がどれだけ狂っていても位置合わせは揺らぎません。
+  </div>
 
   <h2>チャートの構成</h2>
   <table>
     <thead><tr><th>行</th><th>内容</th><th>分かること</th></tr></thead>
     <tbody>
-      <tr><td>四隅マーカー</td><td>赤・緑・青・黄</td><td>位置合わせと向きの判定</td></tr>
-      <tr><td>グレー 17段</td><td>0〜255</td><td>黒/白レベル・ガンマ・チャンネル別ゲイン</td></tr>
+      <tr><td>四隅パターン</td><td>ファインダ×3 + アライメント×1</td><td>位置合わせと向きの判定</td></tr>
+      <tr><td>グレー 17段</td><td>0〜255（2行に分割）</td><td>黒/白レベル・ガンマ・チャンネル別ゲイン</td></tr>
       <tr><td>黒端 8段</td><td>0,4,8,12,16,20,24,32</td><td>暗部のクリップ</td></tr>
       <tr><td>白端 8段</td><td>219〜255</td><td>明部のクリップ</td></tr>
       <tr><td>原色 8色</td><td>RGBCMY + 白黒</td><td>色域の頂点</td></tr>
@@ -231,9 +230,8 @@
 </div>
 
 <div id="stage" role="dialog" aria-label="テストチャート全画面表示">
-  <img id="stageImg" src="patterns/test_pattern_1920x1080.png" alt="テストチャート">
-  <div id="hint">横向きにして表示 — タップで終了</div>
-  <div id="rotate">端末を横向きにしてください</div>
+  <img id="stageImg" src="patterns/test_pattern_1080x1080.png" alt="テストチャート">
+  <div id="hint">タップで終了</div>
 </div>
 
 <script>
