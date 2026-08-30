@@ -6,11 +6,16 @@ this the right place to look when OBS "only offers the device default".
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from pygrabber.dshow_graph import FilterGraph
 
 from . import usb_topology as ut
+
+# Every FourCC media subtype embeds its four characters in the GUID's first
+# field, e.g. {32595559-...} is 'YUY2' read little-endian.
+_FOURCC_GUID = re.compile(r"^\{([0-9A-Fa-f]{8})-0000-0010-8000-00AA00389B71\}$")
 
 
 @dataclass(frozen=True)
@@ -71,6 +76,61 @@ class CaptureDevice:
         return "virtual" in self.name.lower()
 
 
+def _subtype_name(guid: str) -> str:
+    """Readable name for a media subtype, decoding FourCC GUIDs directly.
+
+    pygrabber looks subtypes up in a fixed table and raises KeyError on
+    anything missing from it - OBS's virtual camera emits I420, which is not
+    there. Decoding the FourCC out of the GUID works for any of them, so the
+    table becomes a nicety rather than a dependency.
+    """
+    from pygrabber.dshow_graph import subtypes
+
+    known = subtypes.get(guid)
+    if known:
+        return known
+
+    match = _FOURCC_GUID.match(guid)
+    if match:
+        text = int(match.group(1), 16).to_bytes(4, "little").decode("ascii", "replace")
+        text = text.strip("\x00 ")
+        if text and text.isprintable():
+            return text
+    return guid
+
+
+def _enumerate_formats(device) -> list[VideoFormat]:
+    """Video formats a device advertises, read straight off IAMStreamConfig."""
+    from ctypes import POINTER, cast
+
+    from comtypes import GUID
+    from pygrabber.dshow_graph import VIDEOINFOHEADER, FormatTypes, IAMStreamConfig
+
+    config = device.get_out().QueryInterface(IAMStreamConfig)
+    count, _ = config.GetNumberOfCapabilities()
+    video_info = GUID(FormatTypes.FORMAT_VideoInfo)
+
+    formats: list[VideoFormat] = []
+    for i in range(count):
+        media_type, caps = config.GetStreamCaps(i)
+        if video_info != media_type.contents.formattype:
+            continue
+        header = cast(media_type.contents.pbFormat, POINTER(VIDEOINFOHEADER)).contents.bmi_header
+        # MinFrameInterval is the shortest gap between frames, so it gives the
+        # highest rate - pygrabber's field naming has this back to front.
+        interval = caps.MinFrameInterval
+        formats.append(
+            VideoFormat(
+                index=i,
+                width=header.biWidth,
+                height=abs(header.biHeight),
+                fps=round(10_000_000 / interval, 3) if interval else 0.0,
+                subtype=_subtype_name(str(media_type.contents.subtype)),
+            )
+        )
+    return formats
+
+
 def _read_formats(graph_index: int) -> tuple[list[VideoFormat], tuple[int, int] | None]:
     graph = FilterGraph()
     graph.add_video_input_device(graph_index)
@@ -81,36 +141,20 @@ def _read_formats(graph_index: int) -> tuple[list[VideoFormat], tuple[int, int] 
     except Exception:  # noqa: BLE001 - some virtual cams refuse this
         current = None
 
-    formats: list[VideoFormat] = []
-    for raw in device.get_formats():
-        # pygrabber derives 'min_framerate' from MinFrameInterval; a *smaller*
-        # interval means a *higher* rate, so that field is the maximum fps.
-        fps = max(raw["min_framerate"], raw["max_framerate"])
-        formats.append(
-            VideoFormat(
-                index=raw["index"],
-                width=raw["width"],
-                height=abs(raw["height"]),
-                fps=round(fps, 3),
-                subtype=raw["media_type_str"],
-            )
-        )
-    return formats, current
+    return _enumerate_formats(device), current
 
 
-def grab_single_frame(device_index: int, timeout: float = 8.0):
-    """Capture one frame as an RGB uint8 array, or raise on failure.
+# Formats DirectShow can reliably bridge to the RGB24 the sample grabber wants.
+_PREFERRED_SUBTYPES = ("YUY2", "NV12", "I420", "RGB24", "ARGB32")
 
-    Used by colour calibration, which needs a still rather than a live feed.
-    Safe to call from a worker thread: it initialises COM for that thread.
-    """
+
+def _grab_once(device_index: int, format_index: int | None, timeout: float):
+    """One attempt at a still, optionally pinning the device's output format."""
     import threading
     import time
 
-    import comtypes
     from pygrabber.dshow_graph import FilterGraph
 
-    comtypes.CoInitialize()
     holder: dict[str, object] = {}
     arrived = threading.Event()
 
@@ -123,6 +167,8 @@ def grab_single_frame(device_index: int, timeout: float = 8.0):
     try:
         graph = FilterGraph()
         graph.add_video_input_device(device_index)
+        if format_index is not None:
+            graph.get_input_device().set_format(format_index)
         graph.add_sample_grabber(on_frame)
         graph.add_null_render()
         graph.prepare_preview_graph()
@@ -134,7 +180,7 @@ def grab_single_frame(device_index: int, timeout: float = 8.0):
             time.sleep(1 / 30)
 
         if not arrived.is_set():
-            raise TimeoutError("映像フレームを取得できませんでした（入力信号を確認してください）。")
+            raise TimeoutError("映像フレームが届きませんでした（入力信号を確認してください）。")
         return holder["frame"]
     finally:
         if graph is not None:
@@ -142,6 +188,57 @@ def grab_single_frame(device_index: int, timeout: float = 8.0):
                 graph.stop()
             except Exception:  # noqa: BLE001
                 pass
+
+
+def grab_single_frame(device_index: int, timeout: float = 8.0):
+    """Capture one frame as an RGB uint8 array, or raise on failure.
+
+    Used by colour calibration, which needs a still rather than a live feed.
+    Safe to call from a worker thread: it initialises COM for that thread.
+
+    Whatever format the device happens to be sitting in cannot always be
+    bridged to RGB24 - OBS's virtual camera parks on I420 and the graph
+    refuses to connect - so if the device's own setting fails, pin a format
+    known to convert and try again.
+    """
+    import comtypes
+    from pygrabber.dshow_graph import FilterGraph
+
+    comtypes.CoInitialize()
+    try:
+        attempts: list[int | None] = [None]
+        try:
+            probe = FilterGraph()
+            probe.add_video_input_device(device_index)
+            available = _enumerate_formats(probe.get_input_device())
+            ranked = sorted(
+                (f for f in available if f.subtype in _PREFERRED_SUBTYPES),
+                key=lambda f: (-f.pixels, _PREFERRED_SUBTYPES.index(f.subtype)),
+            )
+            attempts += [f.index for f in ranked[:5]]
+        except Exception:  # noqa: BLE001 - fall back to the default attempt
+            pass
+
+        failures: list[str] = []
+        for format_index in attempts:
+            try:
+                return _grab_once(device_index, format_index, timeout)
+            except TimeoutError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - try the next format
+                label = "既定" if format_index is None else f"format#{format_index}"
+                failures.append(f"{label}: {type(exc).__name__}")
+
+        # Every format failing to even build a graph almost always means the
+        # device is already open elsewhere; a capture device admits one app.
+        raise RuntimeError(
+            "デバイスを開けませんでした。OBS など、このデバイスを使用中のアプリを"
+            "終了してから再試行してください。\n"
+            "（OBS を動かしたまま測りたい場合は、デバイス欄で OBS Virtual Camera を"
+            "選んでください。）\n"
+            "試したフォーマット: " + ", ".join(failures)
+        )
+    finally:
         comtypes.CoUninitialize()
 
 
